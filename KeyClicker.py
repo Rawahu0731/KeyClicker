@@ -3,6 +3,7 @@ from tkinter import messagebox
 import threading
 import time
 import pyautogui
+import pygetwindow as gw  # 追加
 
 class KeyRepeaterApp:
     def __init__(self, master):
@@ -10,6 +11,7 @@ class KeyRepeaterApp:
         self.master.title("キー連打アプリ")
         self.running = False
         self.repeat_thread = None
+        self.target_title = None  # 追加: 連打対象ウィンドウタイトル
 
         # キー入力欄
         tk.Label(master, text="連打したいキー（例: a, space, enter）").pack(pady=5)
@@ -30,10 +32,40 @@ class KeyRepeaterApp:
 
     def repeater(self, keys, interval):
         idx = 0
+        change_count = 0
+        last_title = None
+
+        # 1回目のウィンドウ変更で連打開始、2回目で停止
         while self.running:
-            pyautogui.press(keys[idx])
-            idx = (idx + 1) % len(keys)
-            time.sleep(interval)
+            try:
+                win = gw.getActiveWindow()
+                current_title = win.title if win else None
+            except Exception:
+                current_title = None
+
+            # ウィンドウタイトルが変わったらカウント
+            if current_title != last_title:
+                if last_title is not None:
+                    change_count += 1
+                last_title = current_title
+
+                # 1回目の変更で連打対象を記録
+                if change_count == 1:
+                    self.target_title = current_title
+
+                # 2回目の変更で停止
+                elif change_count == 2:
+                    self.running = False
+                    self.master.after(0, self.stop_repeater)
+                    break
+
+            # 連打対象ウィンドウのときだけキー送信
+            if self.target_title and current_title == self.target_title:
+                pyautogui.press(keys[idx])
+                idx = (idx + 1) % len(keys)
+                time.sleep(interval)
+            else:
+                time.sleep(0.05)
 
     def start_repeater(self):
         key_input = self.key_entry.get().strip()
@@ -54,12 +86,14 @@ class KeyRepeaterApp:
             return
 
         self.running = True
+        self.target_title = None  # 連打対象ウィンドウタイトルをリセット
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
         self.key_entry.config(state="disabled")
         self.interval_entry.config(state="disabled")
         self.repeat_thread = threading.Thread(target=self.repeater, args=(keys, interval), daemon=True)
         self.repeat_thread.start()
+        # 注意ウィンドウは表示しない
 
     def stop_repeater(self):
         self.running = False
