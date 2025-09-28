@@ -1,0 +1,29 @@
+# Text Recognition Macro System Requirements
+
+# OCR (文字認識) - オプション
+pytesseract==0.3.10
+# easyocr==1.7.0  # 代替OCRエンジン（必要に応じてコメント解除）
+
+# 画像処理
+Pillow==10.0.1
+numpy==1.24.3
+
+# マウス・キーボード操作
+pyautogui==0.9.54
+pynput==1.7.6
+
+# GUI (通常Python標準ライブラリに含まれています)
+# tkinter - 標準ライブラリ
+
+# 注意: OCRエンジンのセットアップについて
+# 
+# 1. Tesseract OCR (推奨):
+#    - Windowsの場合: https://github.com/UB-Mannheim/tesseract/wiki からダウンロード
+#    - 日本語認識には追加の言語パック (jpn.traineddata) が必要
+#
+# 2. EasyOCR (代替):
+#    - pip install easyocr
+#    - より簡単にインストール可能だが、処理速度が少し遅い
+#
+# 3. 簡易モード:
+#    - OCRエンジンなしでも基本的な動作は可能（機能は限定的）

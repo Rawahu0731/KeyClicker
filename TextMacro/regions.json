@@ -1,0 +1,42 @@
+{
+  "region_sets": {
+    "デフォルト": [
+      {
+        "name": "鉱物コスト",
+        "x": 311,
+        "y": 800,
+        "width": 28,
+        "height": 34,
+        "target_text": "11",
+        "actions": [
+          {
+            "type": "click",
+            "x": 802,
+            "y": 827
+          },
+          {
+            "type": "wait",
+            "duration": 0.5
+          },
+          {
+            "type": "click",
+            "x": 673,
+            "y": 972
+          },
+          {
+            "type": "wait",
+            "duration": 0.5
+          },
+          {
+            "type": "click",
+            "x": 802,
+            "y": 834
+          }
+        ],
+        "enabled": true
+      }
+    ]
+  },
+  "current_set": "デフォルト",
+  "last_saved": "2025-09-28T22:28:17.014437"
+}
