@@ -7,7 +7,8 @@
         "y": 800,
         "width": 28,
         "height": 34,
-        "target_text": "11",
+        "target_text": "12",
+        "enabled": true,
         "actions": [
           {
             "type": "click",
@@ -32,11 +33,10 @@
             "x": 802,
             "y": 834
           }
-        ],
-        "enabled": true
+        ]
       }
     ]
   },
   "current_set": "デフォルト",
-  "last_saved": "2025-09-28T22:28:17.014437"
+  "last_saved": "2025-09-28T23:08:56.766995"
 }

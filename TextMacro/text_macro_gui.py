@@ -30,11 +30,6 @@ except ImportError:
 
 # EasyOCRの動的インポート（代替OCRエンジン）
 EASYOCR_AVAILABLE = False
-try:
-    import easyocr
-    EASYOCR_AVAILABLE = True
-except ImportError:
-    pass
 
 class TextMacroGUI:
     def __init__(self):
@@ -177,8 +172,9 @@ class TextMacroGUI:
                 print(f"Tesseract設定エラー: {e}")
                 TESSERACT_AVAILABLE = False
         
-        # EasyOCRを試行
-        if EASYOCR_AVAILABLE:
+        # EasyOCRを遅延インポートして試行（トップレベルでのimportは避ける）
+        try:
+            import easyocr
             try:
                 self.easyocr_reader = easyocr.Reader(['ja', 'en'])
                 self.ocr_engine = 'easyocr'
@@ -186,7 +182,9 @@ class TextMacroGUI:
                 return
             except Exception as e:
                 print(f"EasyOCR設定エラー: {e}")
-                EASYOCR_AVAILABLE = False
+        except ImportError:
+            # easyocr がインストールされていない
+            pass
         
         # OCRが利用できない場合
         self.ocr_engine = None
@@ -758,19 +756,30 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
             region = current_regions[region_index]
             
             try:
-                # 領域をキャプチャ
+                # 主領域をキャプチャ
                 image = self.capture_region(region["x"], region["y"], region["width"], region["height"])
                 text = self.extract_text_from_image(image)
-                
+
                 result = f"領域: {region['name']}\n"
                 result += f"座標: ({region['x']}, {region['y']}, {region['width']}, {region['height']})\n"
-                result += f"検索文字: '{region['target_text']}'\n"
+                result += f"検索文字: '{region.get('target_text', '')}'\n"
                 result += f"検出された文字: '{text}'\n"
-                result += f"一致: {'はい' if self.check_text_match(text, region['target_text']) else 'いいえ'}"
-                
+
+                # 比較領域が設定されている場合は追加で比較
+                if region.get('compare_enabled') and region.get('compare_region'):
+                    cr = region['compare_region']
+                    cmp_img = self.capture_region(cr['x'], cr['y'], cr['width'], cr['height'])
+                    cmp_text = self.extract_text_from_image(cmp_img)
+                    match = self.compare_texts(text, cmp_text)
+                    result += f"比較領域の検出文字: '{cmp_text}'\n"
+                    result += f"主領域と比較領域の一致: {'はい' if match else 'いいえ'}\n"
+                    result += f"比較のみでトリガー: {'はい' if region.get('compare_trigger_only') else 'いいえ'}"
+                else:
+                    result += f"一致: {'はい' if self.check_text_match(text, region.get('target_text', '')) else 'いいえ'}"
+
                 messagebox.showinfo("テスト結果", result)
                 self.log(f"テスト実行: {region['name']} - 検出文字: '{text}'")
-                
+
             except Exception as e:
                 messagebox.showerror("エラー", f"テストに失敗しました: {e}")
     
@@ -866,11 +875,35 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                         self.config.get("ocr_language", "jpn+eng")
                     )
                     
-                    # 文字が一致したかチェック
-                    if detected_text and self.check_text_match(detected_text, target_text):
-                        self.root.after(0, lambda: self.log(f"[{name}] 文字が一致: '{detected_text}' → アクション実行"))
-                        
-                        # アクションを実行
+                    # 比較領域が設定されている場合は、両方をOCRして一致判定
+                    compare_cfg = region.get('compare_region')
+                    compare_enabled = region.get('compare_enabled', False)
+                    compare_trigger_only = region.get('compare_trigger_only', False)
+
+                    should_trigger = False
+                    if compare_enabled and compare_cfg:
+                        try:
+                            cmp_img = self.capture_region(compare_cfg['x'], compare_cfg['y'], compare_cfg['width'], compare_cfg['height'])
+                            cmp_text = self.extract_text_from_image(cmp_img, self.config.get("ocr_language", "jpn+eng"))
+
+                            # 比較のみでトリガーするオプションがある場合は一致のみで判定
+                            if detected_text and self.compare_texts(detected_text, cmp_text):
+                                should_trigger = True
+                                self.root.after(0, lambda: self.log(f"[{name}] 比較領域と一致: '{detected_text}' == '{cmp_text}' -> アクション実行"))
+                            elif not compare_trigger_only:
+                                # 比較は有効だがターゲット文字列も指定されている場合はそれでも判定する
+                                if detected_text and self.check_text_match(detected_text, target_text):
+                                    should_trigger = True
+                                    self.root.after(0, lambda: self.log(f"[{name}] 文字が一致: '{detected_text}' → アクション実行"))
+                        except Exception as e:
+                            self.root.after(0, lambda: self.log(f"[{name}] 比較領域OCRエラー: {e}"))
+                    else:
+                        # 通常のターゲット文字列照合
+                        if detected_text and self.check_text_match(detected_text, target_text):
+                            should_trigger = True
+                            self.root.after(0, lambda: self.log(f"[{name}] 文字が一致: '{detected_text}' → アクション実行"))
+
+                    if should_trigger:
                         for action in actions:
                             if not self.running:
                                 break
@@ -923,6 +956,20 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
         
         # 大文字小文字を無視して部分一致
         return target_text.lower() in detected_text.lower()
+
+    def compare_texts(self, text_a, text_b):
+        """2つの文字列を正規化して厳密（大文字小文字無視）一致を判定する
+
+        空白や改行を除去して比較する簡易実装。
+        """
+        try:
+            if not text_a or not text_b:
+                return False
+            a = ' '.join(str(text_a).split()).strip().lower()
+            b = ' '.join(str(text_b).split()).strip().lower()
+            return a == b
+        except Exception:
+            return False
     
     def execute_action(self, action):
         """アクションを実行"""
@@ -979,6 +1026,10 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                 "name": "新しい領域",
                 "x": 100, "y": 100, "width": 200, "height": 100,
                 "target_text": "",
+                # 比較用領域: {'x':..., 'y':..., 'width':..., 'height':...} または None
+                "compare_region": None,
+                "compare_enabled": False,
+                "compare_trigger_only": False,
                 "enabled": True,
                 "actions": []
             }
@@ -1072,6 +1123,78 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                 messagebox.showerror("エラー", f"OCRテストに失敗しました: {e}")
         
         ttk.Button(text_frame, text="OCRテスト", command=test_ocr_region).pack(pady=5)
+
+        # 比較領域設定
+        compare_frame = ttk.LabelFrame(dialog, text="比較領域設定（オプション）", padding="15")
+        compare_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        compare_enabled_var = tk.BooleanVar(value=region_data.get('compare_enabled', False))
+        ttk.Checkbutton(compare_frame, text="比較を有効にする", variable=compare_enabled_var).pack(anchor=tk.W)
+
+        # 比較によるトリガーのみ実行するかのオプション
+        compare_trigger_only_var = tk.BooleanVar(value=region_data.get('compare_trigger_only', False))
+        ttk.Checkbutton(compare_frame, text="比較一致のみでトリガーする", variable=compare_trigger_only_var).pack(anchor=tk.W, pady=(2,5))
+
+        compare_coord_vars = {}
+        compare_labels = [("X座標", "x"), ("Y座標", "y"), ("幅", "width"), ("高さ", "height")]
+        # 初期値設定
+        compare_region = region_data.get('compare_region') or {'x': region_data['x'] + region_data['width'] + 10,
+                                                               'y': region_data['y'],
+                                                               'width': region_data['width'],
+                                                               'height': region_data['height']}
+
+        for i, (label, key) in enumerate(compare_labels):
+            row_frame = ttk.Frame(compare_frame)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=f"比較領域 {label}:").pack(side=tk.LEFT, padx=(0, 10))
+            compare_coord_vars[key] = tk.IntVar(value=compare_region.get(key, 0))
+            ttk.Entry(row_frame, textvariable=compare_coord_vars[key], width=15).pack(side=tk.LEFT)
+
+        def reselect_compare_region():
+            """比較領域を画面上で再選択"""
+            dialog.withdraw()
+            self.is_selecting_region = True
+
+            def on_compare_selected():
+                if hasattr(self, 'selected_region'):
+                    compare_coord_vars['x'].set(self.selected_region['x'])
+                    compare_coord_vars['y'].set(self.selected_region['y'])
+                    compare_coord_vars['width'].set(self.selected_region['width'])
+                    compare_coord_vars['height'].set(self.selected_region['height'])
+                    dialog.deiconify()
+
+            # 領域選択後のコールバックを設定
+            self.region_selection_callback = on_compare_selected
+            self.select_region()
+
+        coord_buttons_frame2 = ttk.Frame(compare_frame)
+        coord_buttons_frame2.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(coord_buttons_frame2, text="比較領域を再選択", command=reselect_compare_region).pack(side=tk.LEFT, padx=(0, 10))
+
+        def test_compare_ocr():
+            try:
+                x, y = coord_vars["x"].get(), coord_vars["y"].get()
+                w, h = coord_vars["width"].get(), coord_vars["height"].get()
+                primary_img = self.capture_region(x, y, w, h)
+                primary_text = self.extract_text_from_image(primary_img)
+
+                if not compare_enabled_var.get():
+                    messagebox.showinfo("OCR比較結果", f"主領域テキスト:\n'{primary_text}'\n\n比較は無効になっています")
+                    return
+
+                cx, cy = compare_coord_vars["x"].get(), compare_coord_vars["y"].get()
+                cw, ch = compare_coord_vars["width"].get(), compare_coord_vars["height"].get()
+                compare_img = self.capture_region(cx, cy, cw, ch)
+                compare_text = self.extract_text_from_image(compare_img)
+
+                match = self.compare_texts(primary_text, compare_text)
+
+                message = f"主領域: '{primary_text}'\n比較領域: '{compare_text}'\n一致: {'はい' if match else 'いいえ'}"
+                messagebox.showinfo("OCR比較結果", message)
+            except Exception as e:
+                messagebox.showerror("エラー", f"OCR比較に失敗しました: {e}")
+
+        ttk.Button(compare_frame, text="比較OCRテスト", command=test_compare_ocr).pack(pady=5)
         
         # 保存・キャンセルボタン
         button_frame = ttk.Frame(dialog)
@@ -1087,6 +1210,14 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                     "height": coord_vars["height"].get(),
                     "target_text": target_text_var.get(),
                     "enabled": enabled_var.get(),
+                    "compare_enabled": compare_enabled_var.get(),
+                    "compare_trigger_only": compare_trigger_only_var.get(),
+                    "compare_region": ({
+                        'x': compare_coord_vars['x'].get(),
+                        'y': compare_coord_vars['y'].get(),
+                        'width': compare_coord_vars['width'].get(),
+                        'height': compare_coord_vars['height'].get()
+                    } if compare_enabled_var.get() else None),
                     "actions": region_data.get("actions", [{
                         'type': 'click',
                         'x': coord_vars["x"].get() + coord_vars["width"].get() // 2,
@@ -1145,6 +1276,11 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
         self.selection_window.attributes('-alpha', 0.3)
         self.selection_window.configure(bg='gray')
         self.selection_window.attributes('-topmost', True)
+        # イベントを確実に受け取るようにグラブを設定
+        try:
+            self.selection_window.grab_set()
+        except Exception:
+            pass
         
         # キャンバスを作成
         self.canvas = tk.Canvas(self.selection_window, highlightthickness=0)
@@ -1177,8 +1313,16 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
     
     def on_mouse_down(self, event):
         """マウスボタン押下時"""
+        # スクリーン座標を保存
         self.start_x = event.x_root
         self.start_y = event.y_root
+        # キャンバス原点(スクリーン座標)を取得
+        try:
+            self._sel_rootx = self.selection_window.winfo_rootx()
+            self._sel_rooty = self.selection_window.winfo_rooty()
+        except Exception:
+            self._sel_rootx = 0
+            self._sel_rooty = 0
         
         # 既存の選択矩形を削除
         if self.rect_id:
@@ -1193,9 +1337,20 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
         if self.rect_id:
             self.canvas.delete(self.rect_id)
         
-        # 新しい選択矩形を描画
+        # 新しい選択矩形を描画（キャンバス座標に変換）
+        try:
+            ox = getattr(self, '_sel_rootx', self.selection_window.winfo_rootx())
+            oy = getattr(self, '_sel_rooty', self.selection_window.winfo_rooty())
+        except Exception:
+            ox, oy = 0, 0
+
+        x1 = self.start_x - ox
+        y1 = self.start_y - oy
+        x2 = event.x_root - ox
+        y2 = event.y_root - oy
+
         self.rect_id = self.canvas.create_rectangle(
-            self.start_x, self.start_y, event.x_root, event.y_root,
+            x1, y1, x2, y2,
             outline='red', width=2, fill='', dash=(5, 5)
         )
     
@@ -1207,7 +1362,7 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
         # 選択領域の座標を計算
         end_x = event.x_root
         end_y = event.y_root
-        
+
         x = min(self.start_x, end_x)
         y = min(self.start_y, end_y)
         width = abs(end_x - self.start_x)
@@ -1667,6 +1822,50 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
         # 初期リスト表示
         update_actions_list()
         
+        # 比較領域設定（追加ダイアログ用）
+        compare_frame_add = ttk.LabelFrame(dialog, text="比較領域設定（オプション）", padding="10")
+        compare_frame_add.pack(fill=tk.X, padx=10, pady=5)
+
+        compare_enabled_var_add = tk.BooleanVar(value=False)
+        ttk.Checkbutton(compare_frame_add, text="比較を有効にする", variable=compare_enabled_var_add).pack(anchor=tk.W)
+
+        compare_trigger_only_var_add = tk.BooleanVar(value=False)
+        ttk.Checkbutton(compare_frame_add, text="比較一致のみでトリガーする", variable=compare_trigger_only_var_add).pack(anchor=tk.W, pady=(2,5))
+
+        # 比較領域のデフォルトは主領域の右側に配置
+        compare_coord_vars_add = {}
+        compare_region_default = {'x': region['x'] + region['width'] + 10,
+                                   'y': region['y'],
+                                   'width': region['width'],
+                                   'height': region['height']}
+
+        compare_labels = [("X座標", "x"), ("Y座標", "y"), ("幅", "width"), ("高さ", "height")]
+        for i, (label, key) in enumerate(compare_labels):
+            row_frame = ttk.Frame(compare_frame_add)
+            row_frame.pack(fill=tk.X, pady=2)
+            ttk.Label(row_frame, text=f"比較領域 {label}:").pack(side=tk.LEFT, padx=(0, 10))
+            compare_coord_vars_add[key] = tk.IntVar(value=compare_region_default.get(key, 0))
+            ttk.Entry(row_frame, textvariable=compare_coord_vars_add[key], width=15).pack(side=tk.LEFT)
+
+        def reselect_compare_region_add():
+            dialog.withdraw()
+            self.is_selecting_region = True
+
+            def on_compare_selected_add():
+                if hasattr(self, 'selected_region'):
+                    compare_coord_vars_add['x'].set(self.selected_region['x'])
+                    compare_coord_vars_add['y'].set(self.selected_region['y'])
+                    compare_coord_vars_add['width'].set(self.selected_region['width'])
+                    compare_coord_vars_add['height'].set(self.selected_region['height'])
+                    dialog.deiconify()
+
+            self.region_selection_callback = on_compare_selected_add
+            self.select_region()
+
+        coord_buttons_frame_add = ttk.Frame(compare_frame_add)
+        coord_buttons_frame_add.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(coord_buttons_frame_add, text="比較領域を選択", command=reselect_compare_region_add).pack(side=tk.LEFT, padx=(0, 10))
+
         # ボタン
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -1676,7 +1875,8 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                 messagebox.showwarning("警告", "領域名を入力してください")
                 return
             
-            if not search_var.get().strip():
+            # 検索文字が空でも、比較のみでトリガーする設定が有効なら許可する
+            if not search_var.get().strip() and not (compare_enabled_var_add.get() and compare_trigger_only_var_add.get()):
                 messagebox.showwarning("警告", "検索する文字を入力してください")
                 return
             
@@ -1689,7 +1889,15 @@ F6: 監視開始/停止  |  F7: 領域追加  |  F8: 緊急停止
                 'height': region['height'],
                 'target_text': search_var.get().strip(),
                 'actions': current_actions.copy(),
-                'enabled': True
+                'enabled': True,
+                'compare_enabled': compare_enabled_var_add.get(),
+                'compare_trigger_only': compare_trigger_only_var_add.get(),
+                'compare_region': ({
+                    'x': compare_coord_vars_add['x'].get(),
+                    'y': compare_coord_vars_add['y'].get(),
+                    'width': compare_coord_vars_add['width'].get(),
+                    'height': compare_coord_vars_add['height'].get()
+                } if compare_enabled_var_add.get() else None)
             }
             
             # 現在のセットに追加

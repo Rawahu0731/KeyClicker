@@ -1,5 +1,32 @@
 {
-  "region_sets": {},
+  "region_sets": {
+    "デフォルト": [
+      {
+        "name": "領域_1",
+        "x": 313,
+        "y": 852,
+        "width": 31,
+        "height": 40,
+        "target_text": "",
+        "enabled": true,
+        "compare_enabled": true,
+        "compare_trigger_only": true,
+        "compare_region": {
+          "x": 303,
+          "y": 963,
+          "width": 29,
+          "height": 31
+        },
+        "actions": [
+          {
+            "type": "click",
+            "x": 674,
+            "y": 1036
+          }
+        ]
+      }
+    ]
+  },
   "current_set": "デフォルト",
-  "last_saved": "2025-09-28T22:09:36.471157"
+  "last_saved": "2025-11-25T15:35:59.218080"
 }
