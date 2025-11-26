@@ -1,127 +1,147 @@
-"""
-fast_input.py
-クロスプラットフォームの高速キー送信モジュール。
-- Linux: evdev + uinput を使って直接注入
-- Windows: keybd_event (WinAPI) を使って注入
-Linux は root または /dev/uinput へのアクセス権が必要です。
-"""
-def _keycode_from_name(name: str):
-import platform
-import sys
+import ctypes
+import time
+import threading
+from ctypes import wintypes
 
-PLATFORM = platform.system().lower()
+# Windows API関数の定義
+user32 = ctypes.WinDLL('user32', use_last_error=True)
 
-if PLATFORM == 'linux':
+# キーコード
+VK_RETURN = 0x0D
+
+# キーイベントフラグ
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+
+# keybd_event関数
+keybd_event = user32.keybd_event
+keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.POINTER(wintypes.ULONG)]
+keybd_event.restype = None
+
+# 停止フラグ
+stop_flag = False
+# 合計押下回数（全サイクル通算）
+total_presses = 0
+# 現在サイクル内の押下回数
+cycle_presses = 0
+# 最大押下回数（1サイクルあたり）
+MAX_PRESSES = 10000
+# クールダウン時間（秒）
+COOLDOWN_SECONDS = 45
+# カウント用ロック
+press_lock = threading.Lock()
+
+def press_enter_fast():
+    """1秒間に約200回のペースでEnterキーを連打（サイクル内で MAX_PRESSES 回で終了）"""
+    global stop_flag, total_presses, cycle_presses
+
+    # 1秒間に200回 = 0.005秒間隔
+    target_interval = 0.005
+
+    while not stop_flag:
+        start = time.perf_counter()
+
+        # キーダウン
+        keybd_event(VK_RETURN, 0, KEYEVENTF_EXTENDEDKEY, None)
+        # キーアップ
+        keybd_event(VK_RETURN, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, None)
+
+        # カウントをインクリメント（サイクルと合計）
+        with press_lock:
+            total_presses += 1
+            cycle_presses += 1
+            # サイクル上限に到達したらこのスレッドは終了
+            if cycle_presses >= MAX_PRESSES:
+                break
+
+        # 次の押下まで待機
+        elapsed = time.perf_counter() - start
+        sleep_time = target_interval - elapsed
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+
+def monitor_stats():
+    """統計情報を表示（合計押下回数と現在速度/平均を表示）"""
+    global total_presses, stop_flag
+    start_time = time.time()
+    last_count = 0
+
+    while not stop_flag:
+        time.sleep(1)
+        current_count = total_presses
+        elapsed = time.time() - start_time
+        pps = (current_count - last_count)  # 1秒あたりの押下回数
+        total_pps = current_count / elapsed if elapsed > 0 else 0
+
+        print(f"\r合計押下回数: {current_count:,} | 現在速度: {pps:,} press/sec | 平均: {total_pps:,.1f} press/sec", end="", flush=True)
+        last_count = current_count
+
+def main():
+    global stop_flag, total_presses, cycle_presses
+
+    print("=" * 70)
+    print("Enter連打ツール (1秒間に約200回)")
+    print("=" * 70)
+    print("\n[設定] 1サイクル: {} 回押下、その後 {} 秒クールダウンを繰り返します".format(MAX_PRESSES, COOLDOWN_SECONDS))
+    print("開始後、3秒間の猶予があります。その間にターゲットウィンドウをアクティブにしてください")
+    print("停止するには、Ctrl+Cを押してください")
+    print("\n準備ができたらEnterキーを押してください...")
+    input()
+
+    print("\n3秒後に開始します...")
+    for i in range(3, 0, -1):
+        print(f"{i}...")
+        time.sleep(1)
+
+    print(f"\n[開始] Enter連打を実行中... (Ctrl+Cで停止)。サイクル: {MAX_PRESSES:,} 回 -> {COOLDOWN_SECONDS} 秒 クールダウン\n")
+
+    # シングルスレッドで実行（速度制限のため）
+    num_threads = 1
+
+    # 統計モニタースレッド
+    stats_thread = threading.Thread(target=monitor_stats, daemon=True)
+    stats_thread.start()
+
     try:
-        from evdev import UInput, ecodes as e
-    except Exception:
-        UInput = None
-        e = None
+        while not stop_flag:
+            # サイクル用カウンタをリセット
+            with press_lock:
+                cycle_presses = 0
 
-    def _keycode_from_name(name: str):
-        n = name.lower()
-        if len(n) == 1 and 'a' <= n <= 'z':
-            return getattr(e, 'KEY_' + n.upper())
-        if len(n) == 1 and '0' <= n <= '9':
-            return getattr(e, 'KEY_' + n)
-        if n == 'space':
-            return e.KEY_SPACE
-        if n in ('enter', 'return'):
-            return e.KEY_ENTER
-        if n == 'tab':
-            return e.KEY_TAB
-        if n == 'esc' or n == 'escape':
-            return e.KEY_ESC
-        if n == 'backspace':
-            return e.KEY_BACKSPACE
-        # 矢印キー
-        if n == 'left':
-            return e.KEY_LEFT
-        if n == 'right':
-            return e.KEY_RIGHT
-        if n == 'up':
-            return e.KEY_UP
-        if n == 'down':
-            return e.KEY_DOWN
-        attr = 'KEY_' + n.upper()
-        return getattr(e, attr, None)
+            threads = []
+            for _ in range(num_threads):
+                t = threading.Thread(target=press_enter_fast, daemon=False)
+                t.start()
+                threads.append(t)
 
-    class FastKeySender:
-        def __init__(self, keys):
-            if UInput is None:
-                raise RuntimeError('evdev not available')
-            self.keys = keys
-            self.keycodes = []
-            for k in keys:
-                code = _keycode_from_name(k)
-                if code is None:
-                    raise ValueError(f"Unsupported key name: {k}")
-                self.keycodes.append(code)
-            caps = {e.EV_KEY: list(set(self.keycodes))}
-            self.ui = UInput(caps, name="keyclicker-uinput")
+            # サイクル内スレッドが完了するまで待機
+            while any(t.is_alive() for t in threads):
+                time.sleep(0.1)
+                if stop_flag:
+                    break
 
-        def press(self, key_name):
-            code = _keycode_from_name(key_name)
-            if code is None:
-                raise ValueError(f"Unsupported key name: {key_name}")
-            self.ui.write(e.EV_KEY, code, 1)
-            self.ui.syn()
-            self.ui.write(e.EV_KEY, code, 0)
-            self.ui.syn()
+            if stop_flag:
+                break
 
-        def close(self):
+            print(f"\n[サイクル完了] {MAX_PRESSES:,} 回押しました。クールダウン {COOLDOWN_SECONDS} 秒...\n")
+
+            # クールダウン（Ctrl+C を許容）
+            remaining = COOLDOWN_SECONDS
             try:
-                self.ui.close()
-            except Exception:
-                pass
+                while remaining > 0 and not stop_flag:
+                    time.sleep(1)
+                    remaining -= 1
+            except KeyboardInterrupt:
+                stop_flag = True
+                break
 
-elif PLATFORM == 'windows':
-    import ctypes
-    from ctypes import wintypes
+    except KeyboardInterrupt:
+        print("\n\n[停止] ユーザによる割り込みを受けました。終了します...")
+        stop_flag = True
+    finally:
+        # 少し待ってスレッドを落ち着かせる
+        time.sleep(0.5)
+        print(f"\n最終結果: 合計 {total_presses:,} 回のEnter押下を実行しました")
 
-    # constants for keybd_event / SendInput
-    KEYEVENTF_KEYUP = 0x0002
-
-    # 简易 mapping of names to virtual-key codes
-    VK_MAP = {}
-    for c in range(ord('A'), ord('Z')+1):
-        VK_MAP[chr(c).lower()] = c
-    for n in range(0, 10):
-        VK_MAP[str(n)] = ord(str(n))
-    VK_MAP.update({
-        'space': 0x20,
-        'enter': 0x0D, 'return': 0x0D,
-        'tab': 0x09,
-        'esc': 0x1B, 'escape': 0x1B,
-        'backspace': 0x08,
-        'left': 0x25, 'up': 0x26, 'right': 0x27, 'down': 0x28,
-    })
-
-    def _vk_from_name(name: str):
-        return VK_MAP.get(name.lower())
-
-    class FastKeySender:
-        def __init__(self, keys):
-            # keys is used only for validation here
-            for k in keys:
-                if _vk_from_name(k) is None:
-                    raise ValueError(f"Unsupported key name for Windows: {k}")
-
-        def press(self, key_name):
-            vk = _vk_from_name(key_name)
-            if vk is None:
-                raise ValueError(f"Unsupported key name for Windows: {key_name}")
-            # key down
-            ctypes.windll.user32.keybd_event(vk, 0, 0, 0)
-            # key up
-            ctypes.windll.user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
-
-        def close(self):
-            return
-
-else:
-    # Unsupported platform: provide a stub that raises on use
-    class FastKeySender:
-        def __init__(self, keys):
-            raise RuntimeError(f'fast_input not supported on {PLATFORM}')
-
+if __name__ == "__main__":
+    main()
